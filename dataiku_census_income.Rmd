@@ -1,0 +1,427 @@
+---
+title: "dataiku"
+author: "Benoit Gautier"
+date: "19 february 2016"
+output: pdf_document
+toc: true
+highlight: zenburn
+---
+
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(dpi=300, echo=FALSE, warning=FALSE, message=FALSE)
+require(ggplot2); require(gridExtra); require(cowplot)
+require(xtable); require(grid); require(pander);
+
+options(xtable.comment = FALSE)
+```
+
+```{r, echo=FALSE}
+# Read training dataset
+training = read.csv(file = "census_income_learn.csv", sep = ";", header = TRUE, na.strings = "?", strip.white=TRUE)
+
+# Read test dataset
+test = read.csv(file = "census_income_test.csv", sep = ";", header = TRUE, na.strings = "?", strip.white=TRUE)
+#text = read.table(file = "census_income_metadata.txt", sep = "\t")
+
+# Remove the variable 'instance weight': See text file
+training = training[, !names(training) %in% c("MARSUPWT", "YEAR")]
+
+# Define types of the variables
+listvar = names(training)
+listvar_quan = c("AAGE", "AHRSPAY", "CAPGAIN", "CAPLOSS", "DIVVAL", "NOEMP", "WKSWORK")
+listvar_qual = listvar[! listvar %in% listvar_quan]
+listvar_qual = listvar_qual[listvar_qual != "OUTCOME"]
+
+# Encode variables as a factor
+training$ADTIND = factor(training$ADTIND)
+training$ADTOCC = factor(training$ADTOCC)
+training$VETYN = factor(training$VETYN)
+training$SEOTR = factor(training$SEOTR)
+```
+
+Short summary
+============
+
+The purpose of this study is to predict whether the income level of a person is over $50,000 a year from the US Census dataset. These data contain 42 social and economic characteristics such as age, sex, taxable income amount. However it was recommended not to use 2 features "instance weight" and "year". Thus there are ignored in this analysis. To perform the prediction task, the data were split into a training set (`r nrow(training)` rows) and a test set (`r nrow(test)` rows). The variable of interest includes two modalities (`r levels(training$OUTCOME)`). Two supervised analyses were tested in this report: a logistic regression and a decision tree.
+
+Descriptive statistics
+============
+
+First, a descriptive analysis of the variables was conducted. The results are displayed  according to the type of the variable (quantitative or qualitative)
+
+Quantitative variables
+---------------------
+
+The table below outputs some basic statistics of the quantitative variables. 
+
+```{r results="asis"}
+quan_na = t(t(sapply(listvar_quan, function(x){sum(is.na(training[, names(training) == x]))})))
+colnames(quan_na) = c("# NA")
+
+suppressPackageStartupMessages(library(pander))
+panderOptions("table.split.table", Inf)  ## don't split tables
+
+trainingtemp = training
+trainingtemp$Group = "All"; trainingtemp$Group = factor(trainingtemp$Group)
+
+trainingSummary <- apply(trainingtemp[, names(trainingtemp) %in% listvar_quan], 2, function(x) tapply(x, trainingtemp$Group, summary))
+trainingSummary <- lapply(trainingSummary, do.call, what = rbind)
+trainingSummary <- do.call(rbind, trainingSummary)
+row.names(trainingSummary) = listvar_quan
+
+set.caption(sub(".", " ", "Summary statistics", fixed = TRUE))
+trainingSummary = cbind(quan_na, trainingSummary)
+
+pander(trainingSummary)
+```
+
+The variables wage per hour (AHRSPAY), capital gains (CAPGAIN), capital losses (CAPLOSS) and dividends from stocks (DIVVAL) have a skewed distribution. A log transformation could have been done. However it was decided to categorize them.  
+
+
+```{r, include=TRUE, fig.height=8, fig.width=8}
+  # Density plot
+
+  m = lapply(listvar_quan, function(x){
+        m1 <- ggplot(training, aes_string(x=x, y = "..density.."))
+        m1 <- m1 + geom_histogram(bins = 50) + geom_density()
+  })
+
+  plot_grid(m[[1]], m[[2]], m[[3]], m[[4]], m[[5]], m[[6]], m[[7]], ncol = 2, nrow = 4)
+```
+
+
+```{r, include=TRUE, fig.height=8, fig.width=8}
+  # Boxplot
+  
+  m = lapply(listvar_quan, function(x){
+        temp = training
+        temp$group = factor(rep("All", nrow(training)))
+        m1 = ggplot(temp, aes_string("group", x))
+        m1 = m1 + geom_boxplot() + labs(x = x)
+  })
+    
+  plot_grid(m[[1]], m[[2]], m[[3]], m[[4]], m[[5]], m[[6]], m[[7]], ncol = 2, nrow = 4)
+```
+
+The variables mentioned above (AHRSPAY, CAPGAIN, CAPLOSS, and DIVVAL) with a skewed distribution were categorized into two categories ("= 0" or "> 0").
+
+Two additional variables WKSWORK and NOEMP were categorized.
+
+- Weeks work in year (WKSWORK) was categorized into 3 categories: "no week", "less than a year", "a year". 
+
+- Num persons worked for employer (NOEMP) was categorized into 2 categories: "no one" and "more than one".
+
+Finally one variable age was kept as continuous variable.
+
+```{r, include=TRUE}
+training$AHRSPAY_qual = ifelse(training[, "AHRSPAY"] == 0, "= 0", "> 0")
+training$CAPGAIN_qual = ifelse(training[, "CAPGAIN"] == 0, "= 0", "> 0")
+training$CAPLOSS_qual = ifelse(training[, "CAPLOSS"] == 0, "= 0", "> 0")
+training$DIVVAL_qual = ifelse(training[, "DIVVAL"] == 0, "= 0", "> 0")
+
+training$WKSWORK_qual = "less than a year"
+training[training$WKSWORK == 52, ]$WKSWORK_qual = "a year"
+training[training$WKSWORK == 0, ]$WKSWORK_qual = "no week"
+
+training$NOEMP_qual = "more than one"
+training[training$NOEMP == 0, ]$NOEMP_qual = "no one"
+
+training$AHRSPAY_qual = factor(training$AHRSPAY_qual)
+training$CAPGAIN_qual = factor(training$CAPGAIN_qual)
+training$CAPLOSS_qual = factor(training$CAPLOSS_qual)
+training$DIVVAL_qual = factor(training$DIVVAL_qual)
+training$WKSWORK_qual = factor(training$WKSWORK_qual)
+training$NOEMP_qual = factor(training$NOEMP_qual)
+```
+
+In order to investigate whether there is an association between the variable "age" and the outcome, we looked at the distribution of this variable within each modality of the outcome variable. The plot below shows that a person between 16yo and 65yo is more likely to earn $50,000 or more a year. In the meantime, no one under 16yo earns more than $50,000 a year.
+
+
+```{r, include = TRUE, fig.height=5, fig.width=10}
+  m1 = ggplot(training, aes_string(x="AAGE", y = "..density..", colour = "OUTCOME"))
+  m1 = m1 + geom_histogram(bins = 50) + geom_density()
+
+  m2 = ggplot(training, aes(OUTCOME, AAGE))
+  m2 = m2 + geom_boxplot(aes(fill = OUTCOME))
+  
+  plot_grid(m1, m2, nrow = 1, ncol = 2)
+
+```
+
+A parametric test (Student test) was applied to highlight a difference of age between groups. As expected, the test is significant. 
+
+```{r, include = TRUE}
+  pander(t.test(training$AAGE ~ training$OUTCOME))
+```
+
+// Finally, we created a qualitative variable for the variable "AAGE" according to the legal // working age and the retirement age. The variable is defined as "younger than 16 yo",
+// "between 17yo and 65yo" and "older than 66yo"
+
+```{r, include = TRUE}
+# training$AAGE_qual = "between 17yo and 65yo"
+# training[training$AAGE < 16, ]$AAGE_qual = "younger than 16yo"
+# training[training$AAGE > 65, ]$AAGE_qual = "older than 66yo"
+# training$AAGE_qual = factor(training$AAGE_qual)
+# 
+# listvar = names(training)
+# listvar_quan = c("AAGE")
+# listvar_qual = c(listvar_qual, "AAGE_qual", "AHRSPAY_qual", "CAPGAIN_qual", "CAPLOSS_qual", "DIVVAL_qual", "WKSWORK_qual", "NOEMP_qual")
+```
+
+Qualitative variables
+---------------------
+
+The table below reports the number of missing data for each qualitative variable along with the number of modalities. 
+
+```{r, results = 'asis', echo = FALSE, include = TRUE}
+qual_na = t(sapply(listvar_qual, function(x){
+  cbind(sum(is.na(training[, names(training) == x])),
+        nlevels(training[, names(training) == x]))}))
+colnames(qual_na) = c("# NA", "# Modalities")
+
+pander(qual_na)
+```
+
+To facilitate the analysis, we removed all variables with missing data or with too many categories. Besides some of the modalities were brought together and merged into a single modality. 
+
+```{r, echo = FALSE, include = FALSE}
+training = training[, !names(training) %in% c("AHSCOL", "ADTIND", "ADTOCC",
+                                              "AMJOCC", "AMJIND",
+                                              "AREORGN", "GRINST", "HHDFMX",
+                                              "MIGMTR1", "MIGMTR3", "MIGMTR4",
+                                              "PEFNTVTY", "PEMNTVTY", "PENATVTY",
+                                              "MIGSUN", "PARENT")]
+
+listvar_qual = listvar_qual[!listvar_qual %in% c("AHSCOL", "ADTIND", "ADTOCC",
+                                                 "AMJOCC", "AMJIND",
+                                              "AREORGN", "GRINST", "HHDFMX",
+                                              "MIGMTR1", "MIGMTR3", "MIGMTR4",
+                                              "PEFNTVTY", "PEMNTVTY", "PENATVTY",
+                                              "MIGSUN", "PARENT")]
+
+training$AHGA = as.character(training$AHGA)
+training$AHGA[training$AHGA%in% c("10th grade", "11th grade", "12th grade no diploma", "1st 2nd 3rd or 4th grade", "5th or 6th grade", "7th and 8th grade", "5th or 6th grade", "9th grade", "Less than 1st grade", "Children", "Some college but no degree")] = "No degree"
+training$AHGA[training$AHGA%in% c("Associates degree-academic program", "Associates degree-occup /vocational")] = "Associates degree"
+training$AHGA[training$AHGA%in% c("Doctorate degree(PhD EdD)", "Doctorate degree(PhD EdD)", "Masters degree(MA MS MEng MEd MSW MBA)", "Prof school degree (MD DDS DVM LLB JD)", "Bachelors degree(BA AB BS)")] = "Degree"
+training$AHGA = factor(training$AHGA)
+
+training$AMARITL = as.character(training$AMARITL)
+training$AMARITL[training$AMARITL%in% c("Married-A F spouse present", "Married-civilian spouse present", "Married-spouse absent")] = "Married"
+training$AMARITL[training$AMARITL%in% c("Divorced", "Separated")] = "Divorced or Separated"
+training$AMARITL = factor(training$AMARITL)
+
+training$AWKSTAT = as.character(training$AWKSTAT)
+training$AWKSTAT[training$AWKSTAT%in% c("PT for econ reasons usually FT", "PT for econ reasons usually PT", "PT for non-econ reasons usually FT")] = "Part time"
+training$AWKSTAT[training$AWKSTAT%in% c("Unemployed full-time", "Unemployed part- time")] = "Unemployed"
+training$AWKSTAT = factor(training$AWKSTAT)
+
+training$HHDREL = as.character(training$HHDREL)
+training$HHDREL[training$HHDREL%in% c("Child 18 or older", "Child under 18 ever married", "Child under 18 never married")] = "Child"
+training$HHDREL[training$HHDREL%in% c("Householder", "Spouse of householder")] = "Householder"
+training$HHDREL[training$HHDREL%in% c("Group Quarters- Secondary individual", "Nonrelative of householder", "Other relative of householder")] = "Other"
+training$HHDREL = factor(training$HHDREL)
+
+training$PRCITSHP = as.character(training$PRCITSHP)
+training$PRCITSHP[training$PRCITSHP%in% c("Foreign born- Not a citizen of U S", "Foreign born- U S citizen by naturalization")] = "Forein born"
+training$PRCITSHP[training$PRCITSHP%in% c("Native- Born abroad of American Parent(s)", "Native- Born in Puerto Rico or U S Outlying", "Native- Born in the United States")] = "Native"
+training$PRCITSHP = factor(training$PRCITSHP)
+
+training$ACLSWKR = as.character(training$ACLSWKR)
+training$ACLSWKR[training$ACLSWKR%in% c("Federal government", "Local government", "State government")] = "Governmment"
+training$ACLSWKR[training$ACLSWKR%in% c("Never worked", "Not in universe", "Without pay")] = "Without pay"
+training$ACLSWKR[training$ACLSWKR%in% c("Self−employed−incorporated", "Self−employed−not incorporated")] = "Self employed"
+training$ACLSWKR = factor(training$ACLSWKR)
+```
+
+Is there an association between some qualitative variables and the outcome? 
+The Chi-2 test testing for the association between 2 qualitative variables indicates a significant association between the outcome and each qualitative variable present in the data. On the barplot, the horizontal line represents the proportion of the class "-50000" in the data. Picking out the variable ASEX, we observe a less proportion of "50000+" in the modality "Female" than in the modality "Male".
+
+```{r, echo = FALSE, include = TRUE, results="asis", fig.height=6, fig.width=8}
+freq1 = lapply(listvar_qual, function(x) {table(training[, names(training) == x], training$OUTCOME)})
+
+panderOptions('knitr.auto.asis', FALSE)
+
+m1 = NULL
+for (i in 1 : length(listvar_qual)){
+  m1[[i]] = ggplot(training, aes_string(x=listvar_qual[i]))
+ 
+  m1[[i]] = m1[[i]] + geom_bar(aes(fill = OUTCOME), position = "fill") +
+     theme(text = element_text(size=10), axis.text.x = element_text(angle=90, vjust=1, size =   9)) + geom_hline(yintercept = 0.938)
+}
+
+
+part2 = lapply(listvar_qual, function(x) {chisq.test(table(training$OUTCOME, training[, names(training) == x]))})
+# part2 = part2[, colnames(part2) %in% c("statistic", "parameter", "p.value")]
+
+for (i in 1 : length(listvar_qual)){
+  #grid.newpage()
+  print(m1[[i]])
+  cat('\r\n\r\n')
+  
+  set.caption(sub(".", " ", "Contingency table", fixed = TRUE))
+  pander(freq1[[i]])
+  
+  set.caption(sub(".", " ", "Pearson's Chi-2 test", fixed = TRUE))
+  pander(part2[[i]])
+}
+```
+
+
+Logistic regression
+=========================
+
+A logistic regression was performed with observation weights set at 1 (no weight). In the model only one continuous variable (age) was included. Most of the variables incorporated in the model are significant. 
+
+
+```{r, echo = FALSE, include = TRUE}
+training_qual = training[, !names(training) %in% c("AAGE_qual", "AHRSPAY",
+                                                   "CAPGAIN", "CAPLOSS",
+                                                   "WKSWORK", "DIVVAL",
+                                                   "NOEMP")]
+
+logreg = glm(formula = OUTCOME ~ ., family = "binomial", data = training_qual)
+
+pander(logreg)
+
+# Prediction on the training set
+
+pred = predict(logreg, training_qual[, names(training_qual) != "OUTCOME"], type = "response")
+
+pred_OUTCOME = rep("- 50000.", nrow(training_qual))
+pred_OUTCOME[pred>0.5] = "50000+."
+pred_training = table(pred_OUTCOME, training$OUTCOME)
+
+```
+
+The percentage of well-classified is equal to `r round(sum(diag(pred_training))/nrow(training)*100)` %. However we observe that only the majority class (-50000.) is correctly predicted by the model (`r round(pred_training[1, 1] / colSums(pred_training)[1]*100)` % for the class "-50000." and `r round(pred_training[2, 2] / colSums(pred_training)[2]*100)` % for the class "50000+") because the design of this study is unbalanced. To improve the performance of the model, a new model with observation weights set at 1 for "-50000." and 8 for "50000+" was processed. 
+
+```{r, echo = FALSE, include = TRUE}
+training_weight = rep(1, nrow(training_qual))
+training_weight[training_qual$OUTCOME == "50000+."] = 15
+logreg2 = glm(formula = OUTCOME ~ ., family = "binomial", data = training_qual, weights = training_weight)
+
+pander(logreg2)
+
+# Prediction on the training set
+
+pred = predict(logreg2, training_qual[, names(training_qual) != "OUTCOME"], type = "response")
+
+pred_OUTCOME = rep("- 50000.", nrow(training_qual))
+pred_OUTCOME[pred>0.5] = "50000+."
+pred_training2 = table(pred_OUTCOME, training$OUTCOME)
+
+```
+
+On the second model, the performances of the model are: `r round(pred_training2[1, 1] / colSums(pred_training)[1]*100)` % of well classified for the class "-50000" and `r round(pred_training2[2, 2] / colSums(pred_training)[2]*100)` for the class "50000+".
+
+
+```{r, echo = FALSE, include = TRUE}
+
+# Because of the unbalanced design of the data, we weighed
+ 
+test$ADTIND = factor(test$ADTIND)
+test$ADTOCC = factor(test$ADTOCC)
+test$VETYN = factor(test$VETYN)
+test$YEAR = factor(test$YEAR)
+test$SEOTR = factor(test$SEOTR)
+
+test$AHRSPAY_qual = ifelse(test[, "AHRSPAY"] == 0, "= 0", "> 0")
+test$CAPGAIN_qual = ifelse(test[, "CAPGAIN"] == 0, "= 0", "> 0")
+test$CAPLOSS_qual = ifelse(test[, "CAPLOSS"] == 0, "= 0", "> 0")
+test$DIVVAL_qual = ifelse(test[, "DIVVAL"] == 0, "= 0", "> 0")
+
+test$AHRSPAY_qual = factor(test$AHRSPAY_qual)
+test$CAPGAIN_qual = factor(test$CAPGAIN_qual)
+test$CAPLOSS_qual = factor(test$CAPLOSS_qual)
+test$DIVVAL_qual = factor(test$DIVVAL_qual)
+
+test$NOEMP_qual = "more than one"
+test[test$NOEMP == 0, ]$NOEMP_qual = "no one"
+test$NOEMP_qual = factor(test$NOEMP_qual)
+
+test$WKSWORK_qual = "less than a year"
+test[test$WKSWORK == 52, ]$WKSWORK_qual = "a year"
+test[test$WKSWORK == 0, ]$WKSWORK_qual = "no week"
+test$WKSWORK_qual = factor(test$WKSWORK_qual)
+
+test$AAGE_qual = "between 17yo and 65yo"
+test[test$AAGE < 16, ]$AAGE_qual = "younger than 16yo"
+test[test$AAGE > 65, ]$AAGE_qual = "older than 66yo"
+test$AAGE_qual = factor(test$AAGE_qual)
+
+test$ACLSWKR = as.character(test$ACLSWKR)
+test$ACLSWKR[test$ACLSWKR%in% c("Federal government", "Local government", "State government")] = "Governmment"
+test$ACLSWKR[test$ACLSWKR%in% c("Never worked", "Not in universe", "Without pay")] = "Without pay"
+test$ACLSWKR[test$ACLSWKR%in% c("Self−employed−incorporated", "Self−employed−not incorporated")] = "Self employed"
+test$ACLSWKR = factor(test$ACLSWKR)
+
+test$AMARITL = as.character(test$AMARITL)
+test$AMARITL[test$AMARITL%in% c("Married-A F spouse present", "Married-civilian spouse present", "Married-spouse absent")] = "Married"
+test$AMARITL[test$AMARITL%in% c("Divorced", "Separated")] = "Divorced or Separated"
+test$AMARITL = factor(test$AMARITL)
+
+test$HHDREL = as.character(test$HHDREL)
+test$HHDREL[test$HHDREL%in% c("Child 18 or older", "Child under 18 ever married", "Child under 18 never married")] = "Child"
+test$HHDREL[test$HHDREL%in% c("Householder", "Spouse of householder")] = "Householder"
+test$HHDREL[test$HHDREL%in% c("Group Quarters- Secondary individual", "Nonrelative of householder", "Other relative of householder")] = "Other"
+test$HHDREL = factor(test$HHDREL)
+
+test$PRCITSHP = as.character(test$PRCITSHP)
+test$PRCITSHP[test$PRCITSHP%in% c("Foreign born- Not a citizen of U S", "Foreign born- U S citizen by naturalization")] = "Forein born"
+test$PRCITSHP[test$PRCITSHP%in% c("Native- Born abroad of American Parent(s)", "Native- Born in Puerto Rico or U S Outlying", "Native- Born in the United States")] = "Native"
+test$PRCITSHP = factor(test$PRCITSHP)
+
+test$AHGA = as.character(test$AHGA)
+test$AHGA[test$AHGA%in% c("10th grade", "11th grade", "12th grade no diploma", "1st 2nd 3rd or 4th grade", "5th or 6th grade", "7th and 8th grade", "5th or 6th grade", "9th grade", "Less than 1st grade", "Children", "Some college but no degree")] = "No degree"
+test$AHGA[test$AHGA%in% c("Associates degree-academic program", "Associates degree-occup /vocational")] = "Associates degree"
+test$AHGA[test$AHGA%in% c("Doctorate degree(PhD EdD)", "Doctorate degree(PhD EdD)", "Masters degree(MA MS MEng MEd MSW MBA)", "Prof school degree (MD DDS DVM LLB JD)", "Bachelors degree(BA AB BS)")] = "Degree"
+test$AHGA = factor(test$AHGA)
+
+test$AWKSTAT = as.character(test$AWKSTAT)
+test$AWKSTAT[test$AWKSTAT%in% c("PT for econ reasons usually FT", "PT for econ reasons usually PT", "PT for non-econ reasons usually FT")] = "Part time"
+test$AWKSTAT[test$AWKSTAT%in% c("Unemployed full-time", "Unemployed part- time")] = "Unemployed"
+test$AWKSTAT = factor(test$AWKSTAT)
+
+pred_test = predict(logreg, test[, names(test) != "OUTCOME"], type = "response")
+
+pred_OUTCOME = rep("- 50000.", nrow(test))
+pred_OUTCOME[pred_test>0.5] = "50000+."
+pred_test = table(pred_OUTCOME, test$OUTCOME)
+
+pred_test2 = predict(logreg2, test[, names(test) != "OUTCOME"], type = "response")
+pred_OUTCOME2 = rep("- 50000.", nrow(test))
+pred_OUTCOME2[pred_test2>0.5] = "50000+."
+pred_test2 = table(pred_OUTCOME2, test$OUTCOME)
+
+```
+
+These two models were applied to the test set in order to validate them.
+
+-Without weight, `r round(pred_test[1, 1] / colSums(pred_test)[1]*100)`% are obtained for the class "-50000" and `r round(pred_test[2, 2] / colSums(pred_test)[2]*100)` are obtained for the class "50000+"
+
+-With weight, `r round(pred_test2[2, 2] / colSums(pred_test2)[2]*100)`% are obtained for the class "-50000" and `r round(pred_test2[2, 2] / colSums(pred_test2)[2]*100)`% are obtained for the class "-50000"
+
+The predictions on the test set are close to the predictions obtained on the training set meaning that there is no overfitting.
+
+
+Decision tree
+=========================
+
+To complete our analysis, we ran a decision tree. In resubstitution, the following results were obtained:
+
+```{r, echo = FALSE, include = TRUE}
+require(party)
+
+tree = ctree(OUTCOME ~ ., data=training_qual)
+
+treepredtrain = predict(tree, data = training_qual, type = "response")
+pander(table(treepredtrain, training_qual$OUTCOME))
+```
+
+and the prediction on the test set:
+
+```{r, echo = FALSE, include = TRUE}
+treepredtest = predict(tree, newdata = test, type = "response")
+pander(table(treepredtest, test$OUTCOME))
+```
